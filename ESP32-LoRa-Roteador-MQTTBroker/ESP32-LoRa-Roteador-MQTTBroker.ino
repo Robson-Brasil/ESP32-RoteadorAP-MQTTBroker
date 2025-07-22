@@ -2,22 +2,30 @@
   IoT - Automação Residencial
   Autor : Robson Brasil
 
-  Dispositivos : ESP32 LoRa Heltec V.2
+  Dispositivos : ESP32 WROOM32
   Preferences--> URLs adicionais do Gerenciador de placas:
                                     ESP32  : https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
   Download Board ESP32 (x.x.x):
   Roteador AP
   Broker MQTT
-  Versão : 1.0 - Release Candidate
-  Última Modificação : 12/09/2024
+  Versão : 1.1
+  Última Modificação : 19/07/2025
 ******************************************************************************************************************************************/
 
-#include <sMQTTBroker.h> // Biblioteca para criar um broker MQTT no ESP32
-#include <WiFi.h>        // Biblioteca para funções de Wi-Fi no ESP32
+#include <Arduino.h>
+#include <WiFi.h>
+#include <sMQTTBroker.h>
+#include <Preferences.h>
+#include "config_login.h"
+#include "config_ip.h"
+#include "config_wifi.h"
+#include "config_mqtt.h"
 
-// Credenciais de acesso para o MQTT Broker
-const char* LoginMQTT = "Colocar Aqui o Seu Login"; // Altere aqui para o seu Login do MQTT Broker.
-const char* SenhaMQTT = "Colocar Aqui a Sua Senha";  // Altere aqui para a sua senha do MQTT Broker.
+// Variáveis globais para monitoramento
+uint8_t numClientesWiFi = 0;
+uint8_t numClientesMQTT = 0;
+
+Preferences preferences;
 
 // Classe que herda de sMQTTBroker e lida com os eventos de clientes MQTT
 class MyBroker : public sMQTTBroker
@@ -33,17 +41,21 @@ public:
         {
             sMQTTNewClientEvent *e = (sMQTTNewClientEvent *)event;
             // Verificar se o nome de usuário e a senha estão corretos para a nova conexão
-            if ((e->Login() != LoginMQTT) || (e->Password() != SenhaMQTT))
+            if ((e->Login() != LOGIN_MQTT) || (e->Password() != SENHA_MQTT))
             {
                 Serial.println("Login ou Senha inválido(s)");
                 return false;  // Rejeitar a conexão se as credenciais forem inválidas
             }
+            numClientesMQTT++;
+            Serial.printf("Novo cliente MQTT conectado. Total: %d\n", numClientesMQTT);
         };
         break;
 
         case LostConnect_sMQTTEventType:
-            // Se a conexão for perdida, tentar reconectar o Wi-Fi
-            WiFi.reconnect();
+            if (numClientesMQTT > 0) {
+                numClientesMQTT--;
+                Serial.printf("Cliente MQTT desconectado. Total: %d\n", numClientesMQTT);
+            }
             break;
 
         // Eventos de subscribe e unsubscribe
@@ -62,34 +74,56 @@ public:
 // Instância da classe MyBroker
 MyBroker broker;
 
+// Callback para quando clientes se conectam/desconectam do AP
+void onWiFiEvent(WiFiEvent_t event) {
+    if (event == WIFI_EVENT_AP_STACONNECTED) {
+        numClientesWiFi++;
+        Serial.print("Cliente Wi-Fi conectado. Total: ");
+        Serial.println(numClientesWiFi);
+    } else if (event == WIFI_EVENT_AP_STADISCONNECTED) {
+        if (numClientesWiFi > 0) numClientesWiFi--;
+        Serial.print("Cliente Wi-Fi desconectado. Total: ");
+        Serial.println(numClientesWiFi);
+    }
+}
+
 void setup()
 {
-    Serial.begin(115200); // Inicializa a comunicação serial para depuração
+    Serial.begin(115200);
+    while (!Serial) { delay(10); }
 
-    // Configurações de IP estático no modo Access Point (AP)
-    IPAddress local_IP(192,168,10,1);    // Define o IP desejado para o AP
-    IPAddress gateway(192,168,10,1);     // O Gateway, normalmente o mesmo do IP do AP
-    IPAddress subnet(255,255,255,0);     // Máscara de sub-rede
+    Serial.println("\nIniciando ESP32 Router + MQTT Broker...");
 
-    // Tenta configurar o IP do AP
-    if (!WiFi.softAPConfig(local_IP, gateway, subnet)) {
-        Serial.println("Falha na configuração do IP do AP!"); // Mensagem de erro se falhar
-    }
+    preferences.begin("esp32-ap", false);
 
-    // Configura o ESP32 como Access Point com nome de rede (SSID) e senha
-    WiFi.softAP("Trocar aqui para o nome da rede WiFi", "Colocar Aqui a Senha do WiFi");  // Substitua pelo seu SSID e senha
-
-    // Exibe o endereço IP do Access Point na serial
-    IPAddress IP = WiFi.softAPIP();
+    WiFi.onEvent(onWiFiEvent);
+    setupWiFiAP();
+    Serial.println("Access Point iniciado com sucesso!");
+    Serial.print("SSID: ");
+    Serial.println(SSID_AP);
     Serial.print("Endereço IP do AP: ");
-    Serial.println(IP); // Exibe o IP atribuído ao AP
+    Serial.println(WiFi.softAPIP());
 
-    // Inicializa o Broker MQTT na porta 1883 (padrão do MQTT)
-    const unsigned short mqttPort = 1883;
-    broker.init(mqttPort); // Inicializa o Broker MQTT
+    if (!broker.init(MQTT_PORT)) {
+        Serial.println("Falha ao iniciar o Broker MQTT!");
+        return;
+    }
+    Serial.println("Broker MQTT iniciado com sucesso!");
 }
 
 void loop()
 {
-    broker.update(); // Mantém o broker MQTT funcionando e atualizado
+    broker.update();
+    static unsigned long ultimoStatus = 0;
+    if (millis() - ultimoStatus >= 30000) {
+        Serial.println("\n=== Status do Sistema ===");
+        Serial.print("Clientes Wi-Fi conectados: ");
+        Serial.println(numClientesWiFi);
+        Serial.print("Clientes MQTT conectados: ");
+        Serial.println(numClientesMQTT);
+        Serial.print("Memória livre: ");
+        Serial.println(ESP.getFreeHeap());
+        Serial.println("=======================");
+        ultimoStatus = millis();
+    }
 }
